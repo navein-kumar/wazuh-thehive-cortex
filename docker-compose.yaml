@@ -1,0 +1,160 @@
+version: "3.8"
+
+services:
+  # Cassandra Database
+  cassandra:
+    image: cassandra:4.1
+    container_name: cassandra
+    restart: unless-stopped
+    mem_limit: 2048m
+    ports:
+      - "9043:9042"
+    environment:
+      - MAX_HEAP_SIZE=1024M
+      - HEAP_NEWSIZE=256M
+      - CASSANDRA_CLUSTER_NAME=thp
+    volumes:
+      - cassandra_data:/var/lib/cassandra
+      - cassandra_logs:/var/log/cassandra
+    networks:
+      - thehive_network
+
+  # Elasticsearch
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:7.17.15
+    container_name: elasticsearch
+    restart: unless-stopped
+    mem_limit: 2048m
+    ports:
+      - "9200:9200"
+    environment:
+      - discovery.type=single-node
+      - cluster.name=hive
+      - http.host=0.0.0.0
+      - transport.host=0.0.0.0
+      - xpack.security.enabled=false
+      - bootstrap.memory_lock=true
+      - ES_JAVA_OPTS=-Xms512m -Xmx512m
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+      memlock:
+        soft: -1
+        hard: -1
+    volumes:
+      - elasticsearch_data:/usr/share/elasticsearch/data
+      - elasticsearch_logs:/usr/share/elasticsearch/logs
+    networks:
+      - thehive_network
+
+  # MinIO S3 Storage
+  minio:
+    image: minio/minio:latest
+    container_name: minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      - MINIO_ROOT_USER=minioadmin
+      - MINIO_ROOT_PASSWORD=minioadmin
+    ports:
+      - "9002:9000"
+      - "9003:9001"
+    volumes:
+      - minio_data:/data
+    networks:
+      - thehive_network
+
+  # TheHive Application
+  thehive:
+    image: strangebee/thehive:5.2
+    container_name: thehive
+    restart: unless-stopped
+    depends_on:
+      - cassandra
+      - elasticsearch
+      - minio
+    mem_limit: 2048m
+    ports:
+      - "9000:9000"
+    environment:
+      - JVM_OPTS=-Xms1024M -Xmx1024M
+    command:
+      - --secret
+      - thehive1234
+      - --cql-hostnames
+      - cassandra
+      - --index-backend
+      - elasticsearch
+      - --es-hostnames
+      - elasticsearch
+      - --s3-endpoint
+      - http://minio:9000
+      - --s3-access-key
+      - minioadmin
+      - --s3-secret-key
+      - minioadmin
+      - --s3-use-path-access-style
+      - --cortex-port
+      - "9001"
+      - --cortex-keys
+      - "Ws1/iPMY7iv8ivr+JRzN63gPCqGoDmtY"
+    volumes:
+      - thehive_data:/opt/thp/thehive/data
+      - thehive_files:/opt/thp/thehive/files
+      - thehive_index:/opt/thp/thehive/index
+      - thehive_logs:/var/log/thehive
+    networks:
+      - thehive_network
+
+  # Cortex Analysis Engine
+  cortex:
+    image: thehiveproject/cortex:3.1.1
+    container_name: cortex
+    restart: unless-stopped
+    depends_on:
+      - elasticsearch
+    mem_limit: 1024m
+    ports:
+      - "9001:9001"
+    command:
+      - --es-uri
+      - http://elasticsearch:9200
+      - --job-directory
+      - /tmp/cortex-jobs
+      - --docker-job-directory
+      - /tmp/cortex-jobs
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /tmp/cortex-jobs:/tmp/cortex-jobs
+      - ./cortex-application.conf:/etc/cortex/application.conf
+      - cortex_logs:/var/log/cortex
+    networks:
+      - thehive_network
+
+volumes:
+  cassandra_data:
+  cassandra_logs:
+  elasticsearch_data:
+  elasticsearch_logs:
+  minio_data:
+  thehive_data:
+  thehive_files:
+  thehive_index:
+  thehive_logs:
+  cortex_logs:
+
+networks:
+  thehive_network:
+    driver: bridge
+
+# Access URLs:
+# TheHive: http://localhost:9000 (admin@thehive.local / secret)
+# Cortex: http://localhost:9001 (admin / thehive)
+# MinIO Console: http://localhost:9003 (minioadmin / minioadmin)
+
+# Post-deployment:
+# 1. chmod 666 /var/run/docker.sock
+# 2. Get Cortex API key from http://localhost:9001
+# 3. Replace YOUR_CORTEX_API_KEY_HERE in TheHive command
+# 4. Restart: docker-compose restart thehive
